@@ -6,8 +6,8 @@ import asyncio
 from datetime import datetime
 
 #меняй на свои значения
-api_id = '12345678'
-api_hash = '1234567812345678'
+api_id = '1234'
+api_hash = '12341234'
 
 #меняй не меняй толку нет
 debug = 0
@@ -17,7 +17,7 @@ session_name = 'session_name'
 spy_list_file = 'spy_list.json'
 messages_cache_file = 'messages_cache.json'
 
-#о великий и могучий deepseek 
+#о великий и могучий deepseek
 
 class SpyClient:
     def __init__(self):
@@ -26,11 +26,11 @@ class SpyClient:
         self.messages_cache = self.load_data(messages_cache_file, {})
         self.admin_id = None  # Инициализируем admin_id как None
 
+        # Регистрируем обработчики событий
         self.client.on(events.NewMessage)(self.handle_new_message)
         self.client.on(events.MessageEdited)(self.handle_edited_message)
+        self.client.on(events.NewMessage)(self.handle_self_destruct_media)  # Добавляем обработчик для одноразовых сообщений
 
-        # Запускаем периодическую проверку удалённых сообщений
-        self.client.loop.create_task(self.check_deleted_messages())
 
     async def initialize(self):
         """Инициализация: получаем ID текущего пользователя."""
@@ -172,7 +172,7 @@ class SpyClient:
                 if chat_id_str not in self.messages_cache:
                     self.messages_cache[chat_id_str] = {}
 
-                
+
                 self.messages_cache[chat_id_str][message_id] = {
                     'user_id': sender.id,
                     'text': event.message.text,
@@ -272,27 +272,30 @@ class SpyClient:
                 await asyncio.sleep(5)  # Если ошибка, ждём 5 секунд перед повторной попыткой
 
     async def handle_self_destruct_media(self, event):
+        """Обрабатывает одноразовые медиафайлы."""
         try:
-            #хм а если медиафайл исчезающий
+            # Проверяем, является ли медиафайл одноразовым
             if (
                 event.message.media
                 and hasattr(event.message.media, 'ttl_seconds')
-                and event.message.media.ttl_seconds > 0  # Убедимся, что это действительно исчезающее медиа
+                and event.message.media.ttl_seconds > 0  # Убедимся, что это действительно одноразовое медиа
             ):
-                #скачиваем нюдсы
+                # Скачиваем медиафайл
                 media_path = await event.message.download_media(file="temp_media/")
 
-                await self.client.send_message(
-                    'me',
-                    "📸 Одноразовое сообщение!",
-                    file=media_path
-                )
+                # Отправляем текстовое сообщение с информацией об удалении
+                sender = await event.get_sender()
+                username = sender.username or f"{sender.first_name or ''} {sender.last_name or ''}".strip()
+                info_message = f"📸 @{username} отправил одноразовое сообщение!\n⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
 
-                #удаляем порнуху пока не видит мама
+                # Отправляем текстовое сообщение и медиафайл
+                await self.client.send_message('me', info_message, file=media_path)
+
+                # Удаляем временный файл
                 os.remove(media_path)
         except Exception as e:
             if debug == 1:
-                print(f"Error handling self-destruct media: {e}")
+                print(f"Ошибка при обработке одноразового медиа: {e}")
 
     async def run(self):
         await self.client.start()
