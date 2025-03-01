@@ -10,23 +10,42 @@ from datetime import datetime
 api_id = '1234'
 api_hash = '1234'
 
-#меняй не меняй толку нет
+# Место отправки уведомлений
+# 'me' = Избранное
+# 12345678 = ID канала/группы/пользователя
+send_to = 'me'
+
+# Через сколько секунд проверять аватарку/описание/ник/юзернейм пользователя. Рекомендую 40-60 секунд
+wait_for_profile_check = 60
+
+# Через сколько секунд проверять наличие удалённых сообщений. Рекомендую 2-5
+wait_for_deleted_messages = 3
+
+# Задержка повторной обработки , если что-либо выдаст ошибку. Не рекомендую ставить ниже 10
+retry_delay = 15
+
+# Вывод полезной информации в терминал. Для разрабов
 debug = 0
 
-#ниже не стоит менять
+#############
+# ОПАСНАЯ ЗОНА #
+#############
+
 session_name = 'session_name'
 spy_list_file = 'spy_list.json'
 messages_cache_file = 'messages_cache.json'
 
-#о великий и могучий deepseek
-
 class SpyClient:
     def __init__(self):
-        self.client = TelegramClient(session_name, api_id, api_hash)
+        # Увеличиваем таймаут для SQLite
+        self.client = TelegramClient(session_name, api_id, api_hash, timeout=10)
         self.spy_list = self.load_data(spy_list_file, [])
         self.messages_cache = self.load_data(messages_cache_file, {})
         self.admin_id = None  # Инициализируем admin_id как None
         self.profile_cache = {}  # Кэш для хранения данных профиля
+
+        # Получатель уведомлений (по умолчанию 'me')
+        self.notification_recipient = send_to  # Меняйте это значение на юзернейм или ID
 
         # Регистрируем обработчики событий
         self.client.on(events.NewMessage)(self.handle_new_message)
@@ -36,7 +55,6 @@ class SpyClient:
         # Запускаем периодическую проверку удалённых сообщений и профилей
         self.client.loop.create_task(self.check_deleted_messages())
         self.client.loop.create_task(self.check_profile_changes())
-
 
     async def initialize(self):
         """Инициализация: получаем ID текущего пользователя."""
@@ -119,7 +137,7 @@ class SpyClient:
         """Выводит список пользователей, на которых включена слежка."""
         try:
             if not self.spy_list:
-                await self.client.send_message('me', "Список отслеживаемых пользователей пуст.")
+                await self.client.send_message(self.notification_recipient, "Список отслеживаемых пользователей пуст.")
                 return
 
             spy_list_message = "🕵️ Список отслеживаемых пользователей:\n\n"
@@ -139,11 +157,11 @@ class SpyClient:
                         print(f"Ошибка при получении информации о пользователе {user_id}: {e}")
                     spy_list_message += f"👤 ID: {user_id}\n"
 
-            await self.client.send_message('me', spy_list_message)
+            await self.client.send_message(self.notification_recipient, spy_list_message)
         except Exception as e:
             if debug == 1:
                 print(f"Ошибка при формировании списка отслеживаемых пользователей: {e}")
-            await self.client.send_message('me', "❌ Ошибка при формировании списка отслеживаемых пользователей.")
+            await self.client.send_message(self.notification_recipient, "❌ Ошибка при формировании списка отслеживаемых пользователей.")
 
     async def add_to_spy_list(self, target_user, chat_id, event):
         entry = [target_user.id, chat_id]
@@ -152,7 +170,7 @@ class SpyClient:
             self.save_data(spy_list_file, self.spy_list)
             username = target_user.username or target_user.first_name
             await self.client.send_message(
-                'me',
+                self.notification_recipient,
                 f'🕵️ Пользователь @{username} добавлен в список отслеживания!'
             )
 
@@ -168,7 +186,7 @@ class SpyClient:
             self.save_data(messages_cache_file, self.messages_cache)
 
     async def check_profile_changes(self):
-        """Периодически проверяет изменения аватарок и ников отслеживаемых пользователей."""
+        """Периодически проверяет изменения профиля отслеживаемых пользователей."""
         while True:
             try:
                 # Проверяем, что клиент подключён
@@ -178,7 +196,7 @@ class SpyClient:
                 for entry in self.spy_list:
                     user_id, chat_id = entry
                     try:
-                        # Получаем информацию о пользователе через API
+                        # Получаем полную информацию о пользователе через API
                         full_user = await self.client(GetFullUserRequest(user_id))
                         user = full_user.users[0]  # Получаем объект пользователя
                         cached_profile = self.profile_cache.get(user_id, {})
@@ -192,13 +210,18 @@ class SpyClient:
                         if user.username != cached_profile.get('username'):
                             changes.append(f"📝 Юзернейм: @{cached_profile.get('username')} → @{user.username}")
 
+                        # Проверяем описание профиля (био)
+                        if hasattr(full_user, 'full_user') and hasattr(full_user.full_user, 'about'):
+                            new_about = full_user.full_user.about
+                            old_about = cached_profile.get('about', '')
+                            if new_about != old_about:
+                                changes.append(f"📝 Описание: {old_about} → {new_about}")
+
                         # Проверяем аватарку
                         if user.photo and user.photo.photo_id != cached_profile.get('photo_id'):
                             changes.append("📸 Аватарка изменена")
-                            # Скачиваем новую аватарку
-                            photo_path = await self.client.download_profile_photo(user)
-                            if photo_path:
-                                changes.append("(Новая аватарка прикреплена)")
+                            # Скачиваем новую аватарку в файл с фиксированным именем
+                            photo_path = await self.client.download_profile_photo(user, file=f"avatars/{user_id}.jpg")
 
                         # Если есть изменения, отправляем уведомление
                         if changes:
@@ -206,17 +229,18 @@ class SpyClient:
                             message += "\n".join(changes)
                             if user.photo and user.photo.photo_id != cached_profile.get('photo_id'):
                                 # Отправляем текстовое сообщение и новую аватарку
-                                await self.client.send_message('me', message, file=photo_path)
+                                await self.client.send_message(self.notification_recipient, message, file=photo_path)
                             else:
                                 # Отправляем только текстовое сообщение
-                                await self.client.send_message('me', message)
+                                await self.client.send_message(self.notification_recipient, message)
 
                             # Обновляем кэш профиля
                             self.profile_cache[user_id] = {
                                 'first_name': user.first_name,
                                 'last_name': user.last_name,
                                 'username': user.username,
-                                'photo_id': user.photo.photo_id if user.photo else None
+                                'photo_id': user.photo.photo_id if user.photo else None,
+                                'about': full_user.full_user.about if hasattr(full_user, 'full_user') and hasattr(full_user.full_user, 'about') else None
                             }
                             self.save_data(messages_cache_file, self.messages_cache)
 
@@ -224,11 +248,11 @@ class SpyClient:
                         if debug == 1:
                             print(f"Ошибка при проверке профиля пользователя {user_id}: {e}")
 
-                await asyncio.sleep(10)  # Проверяем каждые 10 секунд
+                await asyncio.sleep(wait_for_profile_check)  # Проверяем каждые N секунд
             except Exception as e:
                 if debug == 1:
                     print(f"Ошибка в check_profile_changes: {e}")
-                await asyncio.sleep(10)  # Если ошибка, ждём 10 секунд перед повторной попыткой
+                await asyncio.sleep(retry_delay)  # Если ошибка, ждём 10 секунд перед повторной попыткой
 
     async def remove_from_spy_list(self, target_user, chat_id, event):
             entry = [target_user.id, chat_id]
@@ -237,7 +261,7 @@ class SpyClient:
                 self.save_data(spy_list_file, self.spy_list)
                 username = target_user.username or target_user.first_name
                 await self.client.send_message(
-                    'me',
+                    self.notification_recipient,
                     f'❌ Пользователь @{username} удалён из списка отслеживания!'
                 )
 
@@ -280,14 +304,14 @@ class SpyClient:
                     message = f"✏️ @{user.username} изменил сообщение!\n\n"
 
                     if event.message.text != cached['text']:
-                        message += f"Было: 📝 {cached['text']}\n"
+                        message += f"📝 {cached['text']}\n"
                         message += f"💬 {event.message.text}\n\n"
                         message += f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
 
                     if event.message.media:
-                        await self.client.send_message('me', message, file=event.message.media)
+                        await self.client.send_message(self.notification_recipient, message, file=event.message.media)
                     else:
-                        await self.client.send_message('me', message)
+                        await self.client.send_message(self.notification_recipient, message)
 
                     #делаем кэш
                     self.messages_cache[chat_id_str][message_id]['text'] = event.message.text
@@ -332,24 +356,24 @@ class SpyClient:
                             # Если это стикер, отправляем текстовое сообщение и стикер
                             if cached_message['media'] and hasattr(cached_message['media'], 'document'):
                                 # Отправляем текстовое сообщение
-                                await self.client.send_message('me', info_message)
+                                await self.client.send_message(self.notification_recipient, info_message)
                                 # Отправляем стикер
-                                await self.client.send_file('me', cached_message['media'])
+                                await self.client.send_file(self.notification_recipient, cached_message['media'])
                             else:
                                 # Если это не стикер, отправляем текстовое сообщение с текстом или медиа
                                 if cached_message['text']:
                                     info_message += f"💬 {cached_message['text']}"
-                                await self.client.send_message('me', info_message, file=cached_message['media'])
+                                await self.client.send_message(self.notification_recipient, info_message, file=cached_message['media'])
 
                         # Удаляем из кэша
                         del self.messages_cache[chat_id_str][message_id_str]
                         self.save_data(messages_cache_file, self.messages_cache)
 
-                await asyncio.sleep(1)  # Проверяем каждую секунду
+                await asyncio.sleep(wait_for_deleted_messages)  # Проверяем каждую секунду
             except Exception as e:
                 if debug == 1:
                     print(f"Error in check_deleted_messages: {e}")
-                await asyncio.sleep(5)  # Если ошибка, ждём 5 секунд перед повторной попыткой
+                await asyncio.sleep(retry_delay)  # Если ошибка, ждём 10 секунд перед повторной попыткой
 
     async def handle_self_destruct_media(self, event):
         """Обрабатывает одноразовые медиафайлы."""
@@ -369,7 +393,7 @@ class SpyClient:
                 info_message = f"📸 @{username} отправил одноразовое сообщение!\n⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
 
                 # Отправляем текстовое сообщение и медиафайл
-                await self.client.send_message('me', info_message, file=media_path)
+                await self.client.send_message(self.notification_recipient, info_message, file=media_path)
 
                 # Удаляем временный файл
                 os.remove(media_path)
