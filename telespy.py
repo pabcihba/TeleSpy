@@ -24,12 +24,18 @@ class SpyClient:
         self.client = TelegramClient(session_name, api_id, api_hash)
         self.spy_list = self.load_data(spy_list_file, [])
         self.messages_cache = self.load_data(messages_cache_file, {})
+        self.admin_id = None  # Инициализируем admin_id как None
 
         self.client.on(events.NewMessage)(self.handle_new_message)
         self.client.on(events.MessageEdited)(self.handle_edited_message)
 
         # Запускаем периодическую проверку удалённых сообщений
         self.client.loop.create_task(self.check_deleted_messages())
+
+    async def initialize(self):
+        """Инициализация: получаем ID текущего пользователя."""
+        me = await self.client.get_me()
+        self.admin_id = me.id  # Сохраняем ваш ID
 
     def load_data(self, filename, default):
         """Загружает данные из JSON-файла или возвращает значение по умолчанию."""
@@ -61,30 +67,39 @@ class SpyClient:
                 print(f"Error saving data to {filename}: {e}")
 
     async def handle_new_message(self, event):
-        #ВОТ ТУТ МОЖНО РЫПНУТЬСЯ
-        if event.message.message in ('.spy', '.unspy'):
+        # Обработка команд
+        if event.message.message.startswith(('.spy', '.unspy', '.spy_list')):
             await self.process_command(event)
         else:
             await self.cache_message(event)
 
     async def process_command(self, event):
         try:
-            #кто отправил команду
+            # Кто отправил команду
             sender = await event.get_sender()
             chat_id = event.chat_id
             command = event.message.message
 
-            #на кого нацелена команда
-            if event.is_reply:
+            # Проверяем, что команду отправил администратор (вы)
+            if sender.id != self.admin_id:
+                return  # Игнорируем команду, если отправитель не вы
+
+            # На кого нацелена команда
+            if command == '.spy_list':
+                await self.show_spy_list(event)
+                await event.delete()  # Удаляем команду из чата
+                return
+
+            if event.is_reply:  # Если команда отправлена в ответ на сообщение
                 replied_message = await event.get_reply_message()
                 target_user = await replied_message.get_sender()
-            else:
+            else:  # Если команда отправлена без ответа
                 await event.reply("❌ Ошибка: команда должна быть отправлена в ответ на сообщение пользователя.")
                 return
 
             if command == '.spy':
                 await self.add_to_spy_list(target_user, chat_id, event)
-            else:
+            elif command == '.unspy':
                 await self.remove_from_spy_list(target_user, chat_id, event)
 
             await event.delete()
@@ -92,6 +107,37 @@ class SpyClient:
         except Exception as e:
             if debug == 1:
                 print(f"Error processing command: {e}")
+
+
+    async def show_spy_list(self, event):
+        """Выводит список пользователей, на которых включена слежка."""
+        try:
+            if not self.spy_list:
+                await self.client.send_message('me', "Список отслеживаемых пользователей пуст.")
+                return
+
+            spy_list_message = "🕵️ Список отслеживаемых пользователей:\n\n"
+            for entry in self.spy_list:
+                user_id, chat_id = entry
+                try:
+                    user = await self.client.get_entity(user_id)
+                    username = user.username
+                    if username:
+                        spy_list_message += f"👤 ID: {user_id},@{username}, \n"
+                    else:
+                        # Если юзернейма нет, используем имя и фамилию
+                        full_name = f"{user.first_name or ''} {user.last_name or ''}".strip()
+                        spy_list_message += f"👤 ID: {user_id}, Имя: {full_name}\n"
+                except Exception as e:
+                    if debug == 1:
+                        print(f"Ошибка при получении информации о пользователе {user_id}: {e}")
+                    spy_list_message += f"👤 ID: {user_id}\n"
+
+            await self.client.send_message('me', spy_list_message)
+        except Exception as e:
+            if debug == 1:
+                print(f"Ошибка при формировании списка отслеживаемых пользователей: {e}")
+            await self.client.send_message('me', "❌ Ошибка при формировании списка отслеживаемых пользователей.")
 
     async def add_to_spy_list(self, target_user, chat_id, event):
         entry = [target_user.id, chat_id]
@@ -177,37 +223,53 @@ class SpyClient:
             try:
                 for chat_id_str, messages in self.messages_cache.items():
                     chat_id = int(chat_id_str)
-                    for message_id_str, cached_message in messages.items():
+                    deleted_messages = []  # Список для хранения удалённых сообщений
+
+                    # Получаем все сообщения из кэша для текущего чата
+                    for message_id_str, cached_message in list(messages.items()):
                         message_id = int(message_id_str)
 
-                        #проверяем, существует ли сообщение в чате
+                        # Проверяем, существует ли сообщение в чате
                         try:
                             message = await self.client.get_messages(chat_id, ids=message_id)
                             if not message:
-                                #удалил сообщение
-                                user = await self.client.get_entity(cached_message['user_id'])
-                                if [cached_message['user_id'], chat_id] in self.spy_list:
-                                    message = f"🗑 @{user.username} удалил сообщение!\n⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-
-                                    if cached_message['text']:
-                                        message += f"💬 {cached_message['text']}"
-
-                                    
-                                    if cached_message['media']:
-                                        await self.client.send_message('me', message, file=cached_message['media'])
-                                    else:
-                                        await self.client.send_message('me', message)
-
-                                #удаляем из кэша
-                                del self.messages_cache[chat_id_str][message_id_str]
-                                self.save_data(messages_cache_file, self.messages_cache)
+                                # Сообщение удалено, добавляем в список
+                                deleted_messages.append((message_id_str, cached_message))
                         except Exception as e:
                             if debug == 1:
                                 print(f"Error checking message {message_id} in chat {chat_id}: {e}")
-                await asyncio.sleep(1)
+
+                    # Сортируем удалённые сообщения по дате отправки
+                    deleted_messages.sort(key=lambda x: x[1]['date'])
+
+                    # Обрабатываем все удалённые сообщения в порядке их отправки
+                    for message_id_str, cached_message in deleted_messages:
+                        user = await self.client.get_entity(cached_message['user_id'])
+                        if [cached_message['user_id'], chat_id] in self.spy_list:
+                            # Формируем текстовое сообщение с информацией об удалении
+                            info_message = f"🗑 @{user.username} удалил сообщение!\n⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+
+                            # Если это стикер, отправляем текстовое сообщение и стикер
+                            if cached_message['media'] and hasattr(cached_message['media'], 'document'):
+                                # Отправляем текстовое сообщение
+                                await self.client.send_message('me', info_message)
+                                # Отправляем стикер
+                                await self.client.send_file('me', cached_message['media'])
+                            else:
+                                # Если это не стикер, отправляем текстовое сообщение с текстом или медиа
+                                if cached_message['text']:
+                                    info_message += f"💬 {cached_message['text']}"
+                                await self.client.send_message('me', info_message, file=cached_message['media'])
+
+                        # Удаляем из кэша
+                        del self.messages_cache[chat_id_str][message_id_str]
+                        self.save_data(messages_cache_file, self.messages_cache)
+
+                await asyncio.sleep(1)  # Проверяем каждую секунду
             except Exception as e:
                 if debug == 1:
                     print(f"Error in check_deleted_messages: {e}")
+                await asyncio.sleep(5)  # Если ошибка, ждём 5 секунд перед повторной попыткой
 
     async def handle_self_destruct_media(self, event):
         try:
@@ -239,7 +301,13 @@ class SpyClient:
 
         await self.client.run_until_disconnected()
 
+async def main():
+    spy_client = SpyClient()
+    await spy_client.client.start()
+    await spy_client.initialize()  # Инициализируем admin_id
+    print("Скрипт запущен!")
+    await spy_client.client.run_until_disconnected()
+
 if __name__ == '__main__':
     spy_client = SpyClient()
-    print('TeleSpy started!')
-    spy_client.client.loop.run_until_complete(spy_client.run())
+    spy_client.client.loop.run_until_complete(main())
