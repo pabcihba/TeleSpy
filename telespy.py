@@ -11,7 +11,7 @@ api_id = '1234'
 api_hash = '1234'
 
 #меняй не меняй толку нет
-debug = 1
+debug = 0
 
 #ниже не стоит менять
 session_name = 'session_name'
