@@ -1,5 +1,6 @@
 from telethon import TelegramClient, events
 from telethon.tl.types import PeerUser, PeerChat, PeerChannel
+from telethon.tl.functions.users import GetFullUserRequest
 import json
 import os
 import asyncio
@@ -7,10 +8,10 @@ from datetime import datetime
 
 #меняй на свои значения
 api_id = '1234'
-api_hash = '12341234'
+api_hash = '1234'
 
 #меняй не меняй толку нет
-debug = 0
+debug = 1
 
 #ниже не стоит менять
 session_name = 'session_name'
@@ -25,11 +26,16 @@ class SpyClient:
         self.spy_list = self.load_data(spy_list_file, [])
         self.messages_cache = self.load_data(messages_cache_file, {})
         self.admin_id = None  # Инициализируем admin_id как None
+        self.profile_cache = {}  # Кэш для хранения данных профиля
 
         # Регистрируем обработчики событий
         self.client.on(events.NewMessage)(self.handle_new_message)
         self.client.on(events.MessageEdited)(self.handle_edited_message)
-        self.client.on(events.NewMessage)(self.handle_self_destruct_media)  # Добавляем обработчик для одноразовых сообщений
+        self.client.on(events.NewMessage)(self.handle_self_destruct_media)
+
+        # Запускаем периодическую проверку удалённых сообщений и профилей
+        self.client.loop.create_task(self.check_deleted_messages())
+        self.client.loop.create_task(self.check_profile_changes())
 
 
     async def initialize(self):
@@ -123,7 +129,7 @@ class SpyClient:
                     user = await self.client.get_entity(user_id)
                     username = user.username
                     if username:
-                        spy_list_message += f"👤 ID: {user_id},@{username}, \n"
+                        spy_list_message += f"👤 ID: {user_id},@{username}\n"
                     else:
                         # Если юзернейма нет, используем имя и фамилию
                         full_name = f"{user.first_name or ''} {user.last_name or ''}".strip()
@@ -150,16 +156,90 @@ class SpyClient:
                 f'🕵️ Пользователь @{username} добавлен в список отслеживания!'
             )
 
+            # Получаем полную информацию о пользователе через API
+            full_user = await self.client(GetFullUserRequest(target_user))
+            self.profile_cache[target_user.id] = {
+                'first_name': target_user.first_name,
+                'last_name': target_user.last_name,
+                'username': target_user.username,
+                'photo_id': target_user.photo.photo_id if target_user.photo else None,
+                'about': full_user.about if hasattr(full_user, 'about') else None  # Описание профиля
+            }
+            self.save_data(messages_cache_file, self.messages_cache)
+
+    async def check_profile_changes(self):
+        """Периодически проверяет изменения аватарок и ников отслеживаемых пользователей."""
+        while True:
+            try:
+                # Проверяем, что клиент подключён
+                if not self.client.is_connected():
+                    await self.client.connect()
+
+                for entry in self.spy_list:
+                    user_id, chat_id = entry
+                    try:
+                        # Получаем информацию о пользователе через API
+                        full_user = await self.client(GetFullUserRequest(user_id))
+                        user = full_user.users[0]  # Получаем объект пользователя
+                        cached_profile = self.profile_cache.get(user_id, {})
+
+                        # Проверяем изменения в профиле
+                        changes = []
+                        if user.first_name != cached_profile.get('first_name'):
+                            changes.append(f"📝 Имя: {cached_profile.get('first_name')} → {user.first_name}")
+                        if user.last_name != cached_profile.get('last_name'):
+                            changes.append(f"📝 Фамилия: {cached_profile.get('last_name')} → {user.last_name}")
+                        if user.username != cached_profile.get('username'):
+                            changes.append(f"📝 Юзернейм: @{cached_profile.get('username')} → @{user.username}")
+
+                        # Проверяем аватарку
+                        if user.photo and user.photo.photo_id != cached_profile.get('photo_id'):
+                            changes.append("📸 Аватарка изменена")
+                            # Скачиваем новую аватарку
+                            photo_path = await self.client.download_profile_photo(user)
+                            if photo_path:
+                                changes.append("(Новая аватарка прикреплена)")
+
+                        # Если есть изменения, отправляем уведомление
+                        if changes:
+                            message = f"🔄 @{user.username or user.first_name} изменил профиль:\n\n"
+                            message += "\n".join(changes)
+                            if user.photo and user.photo.photo_id != cached_profile.get('photo_id'):
+                                # Отправляем текстовое сообщение и новую аватарку
+                                await self.client.send_message('me', message, file=photo_path)
+                            else:
+                                # Отправляем только текстовое сообщение
+                                await self.client.send_message('me', message)
+
+                            # Обновляем кэш профиля
+                            self.profile_cache[user_id] = {
+                                'first_name': user.first_name,
+                                'last_name': user.last_name,
+                                'username': user.username,
+                                'photo_id': user.photo.photo_id if user.photo else None
+                            }
+                            self.save_data(messages_cache_file, self.messages_cache)
+
+                    except Exception as e:
+                        if debug == 1:
+                            print(f"Ошибка при проверке профиля пользователя {user_id}: {e}")
+
+                await asyncio.sleep(10)  # Проверяем каждые 10 секунд
+            except Exception as e:
+                if debug == 1:
+                    print(f"Ошибка в check_profile_changes: {e}")
+                await asyncio.sleep(10)  # Если ошибка, ждём 10 секунд перед повторной попыткой
+
     async def remove_from_spy_list(self, target_user, chat_id, event):
-        entry = [target_user.id, chat_id]
-        if entry in self.spy_list:
-            self.spy_list.remove(entry)
-            self.save_data(spy_list_file, self.spy_list)
-            username = target_user.username or target_user.first_name
-            await self.client.send_message(
-                'me',
-                f'❌ Пользователь @{username} удалён из списка отслеживания!'
-            )
+            entry = [target_user.id, chat_id]
+            if entry in self.spy_list:
+                self.spy_list.remove(entry)
+                self.save_data(spy_list_file, self.spy_list)
+                username = target_user.username or target_user.first_name
+                await self.client.send_message(
+                    'me',
+                    f'❌ Пользователь @{username} удалён из списка отслеживания!'
+                )
 
     async def cache_message(self, event):
         try:
@@ -314,3 +394,4 @@ async def main():
 if __name__ == '__main__':
     spy_client = SpyClient()
     spy_client.client.loop.run_until_complete(main())
+
