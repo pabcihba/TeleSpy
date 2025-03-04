@@ -16,7 +16,7 @@ Cохраняй саморазрушающиеся файлы и следи за
 - `git clone https://github.com/pabcihba/TeleSpy ; pip install telethon; pip install os; pip install json; pip install asyncio; pip install requets; pip install pytz`
 ## Настройка ⚙️
 - Перейдите по [этой ссылке](https://my.telegram.org/auth?to=apps) , зарегистрируйтесь , создайте приложение и получите API_ID и API_HASH
-- Перейдите к [@BotFather в телеграмме ,](https://t.me/botfather)пропишите команду /newbot , создайте бота , получите его TOKEN
+- Перейдите к [@BotFather в телеграмме](https://t.me/botfather) , пропишите команду /newbot , создайте бота , получите его TOKEN
 - Откройте файл telespy.py и замените API_ID и API_HASH на полученные вами значения
 > Вы можете редактировать прямо в терминале `nano telespy.py` , а затем CTRL + O , ENTER , CTRL + Z
 - Введите `cd TeleSpy; python telespy.py` и пройдите регистрацию бота на ваш аккаунт
